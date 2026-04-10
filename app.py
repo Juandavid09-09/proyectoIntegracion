@@ -11,8 +11,9 @@ aplicacion = Flask(__name__)
 #  CONFIGURACIÓN
 # ─────────────────────────────────────────────────────────────
 
-CLAVE_API        = os.environ.get("API_KEY", "CECAR-DEMO-KEY")
-MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL", "").strip()
+CLAVE_API            = os.environ.get("API_KEY", "CECAR-DEMO-KEY")
+MAKE_WEBHOOK_URL     = os.environ.get("MAKE_WEBHOOK_URL", "").strip()
+MAKE_WEBHOOK_CORREOS = os.environ.get("MAKE_WEBHOOK_CORREOS", "").strip()
 
 # ─────────────────────────────────────────────────────────────
 #  ALMACENAMIENTO EN MEMORIA
@@ -87,20 +88,21 @@ def registrar_evento(tipo: str, id_solicitud: str, payload: dict) -> dict:
 
 
 def enviar_a_make(payload: dict):
-    """Envía el payload JSON al webhook de Make (si está configurado)."""
-    if not MAKE_WEBHOOK_URL:
-        return
-    try:
-        data = json.dumps(payload).encode("utf-8")
-        req  = Request(
-            MAKE_WEBHOOK_URL,
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
-        urlopen(req, timeout=6).read()
-    except Exception as e:
-        print(f"[MAKE] Error al enviar webhook: {e}")
+    """Envía el evento a los dos webhooks de Make configurados."""
+    for url in [MAKE_WEBHOOK_URL, MAKE_WEBHOOK_CORREOS]:
+        if not url:
+            continue
+        try:
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            req  = Request(
+                url,
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            urlopen(req, timeout=6).read()
+        except Exception as e:
+            print(f"[MAKE] Error al enviar a {url}: {e}")
 
 # ─────────────────────────────────────────────────────────────
 #  VALIDACIÓN — INTEROPERABILIDAD SINTÁCTICA
@@ -110,6 +112,7 @@ def enviar_a_make(payload: dict):
 #  Campo               Tipo    Descripción
 #  ──────────────────────────────────────────────────────────
 #  nombre_estudiante   string  Nombre completo del estudiante
+#  email_estudiante    string  Correo electrónico del estudiante
 #  curso               string  Nombre o código de la asignatura
 #  tema                string  Tema puntual de la duda
 #  descripcion         string  Explicación detallada de la duda
@@ -118,13 +121,16 @@ def enviar_a_make(payload: dict):
 NIVELES_URGENCIA_VALIDOS = {"baja", "media", "alta"}
 
 def validar_solicitud(datos: dict):
-    campos = ["nombre_estudiante", "curso", "tema", "descripcion", "urgencia"]
+    campos = ["nombre_estudiante", "email_estudiante", "curso", "tema", "descripcion", "urgencia"]
     for campo in campos:
         if campo not in datos:
             return False, f"Falta el campo obligatorio: '{campo}'"
 
     if not isinstance(datos["nombre_estudiante"], str) or not datos["nombre_estudiante"].strip():
         return False, "'nombre_estudiante' debe ser texto no vacío"
+
+    if not isinstance(datos["email_estudiante"], str) or "@" not in datos["email_estudiante"]:
+        return False, "'email_estudiante' debe ser un correo válido"
 
     if not isinstance(datos["curso"], str) or not datos["curso"].strip():
         return False, "'curso' debe ser texto no vacío"
@@ -189,6 +195,7 @@ def recibir_solicitud():
     solicitud = {
         "id_solicitud":      id_solicitud,
         "nombre_estudiante": datos["nombre_estudiante"].strip(),
+        "email_estudiante":  datos["email_estudiante"].strip().lower(),
         "curso":             datos["curso"].strip(),
         "tema":              datos["tema"].strip(),
         "descripcion":       datos["descripcion"].strip(),
@@ -201,6 +208,7 @@ def recibir_solicitud():
     # ── EVENTO 1: solicitud_creada ───────────────────────────
     registrar_evento("solicitud_creada", id_solicitud, {
         "nombre_estudiante": solicitud["nombre_estudiante"],
+        "email_estudiante":  solicitud["email_estudiante"],
         "curso":    solicitud["curso"],
         "tema":     solicitud["tema"],
         "urgencia": solicitud["urgencia"]
@@ -212,11 +220,12 @@ def recibir_solicitud():
 
     # ── EVENTO 2: solicitud_clasificada ─────────────────────
     registrar_evento("solicitud_clasificada", id_solicitud, {
-        "tipo_consulta": tipo,
-        "criterio": (
-            f"urgencia={solicitud['urgencia']}, "
-            f"longitud_descripcion={len(solicitud['descripcion'])}"
-        )
+        "tipo_consulta":     tipo,
+        "nombre_estudiante": solicitud["nombre_estudiante"],
+        "email_estudiante":  solicitud["email_estudiante"],
+        "curso":             solicitud["curso"],
+        "tema":              solicitud["tema"],
+        "urgencia":          solicitud["urgencia"]
     })
 
     # ── RAMA SIMPLE ──────────────────────────────────────────
@@ -232,8 +241,12 @@ def recibir_solicitud():
 
         # ── EVENTO 3: respuesta_directa_enviada ─────────────
         registrar_evento("respuesta_directa_enviada", id_solicitud, {
-            "respuesta": respuesta_texto,
-            "canal":     "sistema"
+            "nombre_estudiante": solicitud["nombre_estudiante"],
+            "email_estudiante":  solicitud["email_estudiante"],
+            "tema":              solicitud["tema"],
+            "curso":             solicitud["curso"],
+            "respuesta":         respuesta_texto,
+            "canal":             "sistema"
         })
 
         return jsonify({
@@ -255,6 +268,7 @@ def recibir_solicitud():
             "id_asesoria":       id_asesoria,
             "id_solicitud":      id_solicitud,
             "nombre_estudiante": solicitud["nombre_estudiante"],
+            "email_estudiante":  solicitud["email_estudiante"],
             "curso":             solicitud["curso"],
             "tema":              solicitud["tema"],
             "urgencia":          solicitud["urgencia"],
@@ -266,19 +280,22 @@ def recibir_solicitud():
 
         # ── EVENTO 4: requiere_asesoria ──────────────────────
         registrar_evento("requiere_asesoria", id_solicitud, {
-            "motivo": (
-                f"urgencia={solicitud['urgencia']}, "
-                f"descripcion_extensa={len(solicitud['descripcion']) >= 200}"
-            ),
-            "id_asesoria": id_asesoria
+            "nombre_estudiante": solicitud["nombre_estudiante"],
+            "email_estudiante":  solicitud["email_estudiante"],
+            "curso":             solicitud["curso"],
+            "tema":              solicitud["tema"],
+            "urgencia":          solicitud["urgencia"],
+            "id_asesoria":       id_asesoria
         })
 
         # ── EVENTO 5: asesoria_programada ────────────────────
         registrar_evento("asesoria_programada", id_solicitud, {
-            "id_asesoria": id_asesoria,
-            "curso":       solicitud["curso"],
-            "tema":        solicitud["tema"],
-            "estudiante":  solicitud["nombre_estudiante"]
+            "id_asesoria":       id_asesoria,
+            "nombre_estudiante": solicitud["nombre_estudiante"],
+            "email_estudiante":  solicitud["email_estudiante"],
+            "curso":             solicitud["curso"],
+            "tema":              solicitud["tema"],
+            "urgencia":          solicitud["urgencia"]
         })
 
         return jsonify({
