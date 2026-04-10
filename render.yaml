@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: cecar-asesorias
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:aplicacion --bind 0.0.0.0:$PORT
+    envVars:
+      - key: API_KEY
+        value: CECAR-DEMO-KEY        # cámbiala en producción
+      - key: MAKE_WEBHOOK_URL
+        value: ""                    # pega aquí la URL del webhook de Make
