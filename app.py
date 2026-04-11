@@ -71,6 +71,8 @@ def respuesta_error(codigo_http: int, codigo_error: str, mensaje: str, detalles=
 def registrar_evento(tipo: str, id_solicitud: str, payload: dict) -> dict:
     """
     Crea un evento, lo guarda en memoria y lo reenvía a Make.
+    Los campos del payload se elevan a la raíz del JSON para que
+    Make pueda leerlos directamente con {{1.campo}} sin Parse JSON.
     Tipos obligatorios según el proyecto:
       solicitud_creada | solicitud_clasificada |
       respuesta_directa_enviada | requiere_asesoria | asesoria_programada
@@ -80,7 +82,8 @@ def registrar_evento(tipo: str, id_solicitud: str, payload: dict) -> dict:
         "tipo":         tipo,
         "id_solicitud": id_solicitud,
         "timestamp":    ahora_iso(),
-        "payload":      payload
+        "payload":      payload,
+        **payload
     }
     EVENTOS.append(evento)
     enviar_a_make(evento)
@@ -225,7 +228,8 @@ def recibir_solicitud():
         "email_estudiante":  solicitud["email_estudiante"],
         "curso":             solicitud["curso"],
         "tema":              solicitud["tema"],
-        "urgencia":          solicitud["urgencia"]
+        "urgencia":          solicitud["urgencia"],
+        "descripcion":       solicitud["descripcion"]
     })
 
     # ── RAMA SIMPLE ──────────────────────────────────────────
