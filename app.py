@@ -7,50 +7,29 @@ from urllib.request import Request, urlopen
 
 aplicacion = Flask(__name__)
 
-# ─────────────────────────────────────────────────────────────
-#  CONFIGURACIÓN
-# ─────────────────────────────────────────────────────────────
-
-CLAVE_API             = os.environ.get("API_KEY", "CECAR-DEMO-KEY")
-MAKE_WEBHOOK_SHEETS   = os.environ.get("MAKE_WEBHOOK_SHEETS", "").strip()
-MAKE_WEBHOOK_CORREOS  = os.environ.get("MAKE_WEBHOOK_CORREOS", "").strip()
-
-# ─────────────────────────────────────────────────────────────
-#  ALMACENAMIENTO EN MEMORIA
-# ─────────────────────────────────────────────────────────────
+CLAVE_API = os.environ.get("CLAVE_API", "CECAR-DEMO-KEY")
+MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL", "").strip()
 
 SOLICITUDES = []
-EVENTOS     = []
-ASESORIAS   = []
 
-# ─────────────────────────────────────────────────────────────
-#  SEMÁNTICA: simple vs compleja
-# ─────────────────────────────────────────────────────────────
-#
-#  SIMPLE  → urgencia baja
-#            O urgencia media + descripción < 200 chars
-#            Acción: respuesta directa del docente
-#
-#  COMPLEJA → urgencia alta
-#             O urgencia media + descripción >= 200 chars
-#             Acción: se agenda asesoría formal
+URGENCIAS_VALIDAS = {"bajo", "medio", "alto"}
 
-def clasificar_solicitud(descripcion: str, urgencia: str) -> str:
-    if urgencia == "alta":
-        return "compleja"
-    if urgencia == "media" and len(descripcion.strip()) >= 200:
-        return "compleja"
-    return "simple"
+TEMAS_CRITICOS = {
+    "parcial", "examen", "final", "proyecto", "tesis",
+    "sustentacion", "calculo", "programacion", "algoritmos",
+    "base de datos", "estadistica",
+}
 
-# ─────────────────────────────────────────────────────────────
-#  UTILIDADES
-# ─────────────────────────────────────────────────────────────
 
-def ahora_iso():
+def momento_actual():
     return datetime.now().isoformat(timespec="seconds")
 
 
-def respuesta_error(codigo_http, codigo_error, mensaje, detalles=None):
+def fecha_legible():
+    return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+
+def error_json(codigo_http, codigo_error, mensaje, detalles=None):
     return jsonify({
         "ok": False,
         "codigo_error": codigo_error,
@@ -59,311 +38,196 @@ def respuesta_error(codigo_http, codigo_error, mensaje, detalles=None):
     }), codigo_http
 
 
-def enviar_webhook(url: str, payload: dict):
-    """Envía un JSON a una URL de webhook."""
-    if not url:
+def disparar_webhook(payload: dict):
+    if not MAKE_WEBHOOK_URL:
         return
     try:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        req  = Request(url, data=data,
-                       headers={"Content-Type": "application/json"},
-                       method="POST")
-        urlopen(req, timeout=6).read()
+        datos = json.dumps(payload).encode("utf-8")
+        peticion = Request(
+            MAKE_WEBHOOK_URL,
+            data=datos,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        urlopen(peticion, timeout=6).read()
     except Exception as e:
-        print(f"[WEBHOOK] Error → {url}: {e}")
+        print("Fallo al contactar Make:", str(e))
 
 
-def registrar_evento(tipo: str, id_solicitud: str, payload: dict) -> dict:
-    """Guarda el evento y lo envía al webhook de Sheets."""
-    evento = {
-        "id_evento":    f"EVT-{str(uuid.uuid4())[:8].upper()}",
-        "tipo":         tipo,
-        "id_solicitud": id_solicitud,
-        "timestamp":    ahora_iso(),
-        **payload
-    }
-    EVENTOS.append(evento)
-    enviar_webhook(MAKE_WEBHOOK_SHEETS, evento)
-    return evento
-
-# ─────────────────────────────────────────────────────────────
-#  VALIDACIÓN — contrato JSON
-# ─────────────────────────────────────────────────────────────
-#
-#  Campo               Tipo    Descripción
-#  nombre_estudiante   string  Nombre completo del estudiante
-#  email_estudiante    string  Correo del estudiante
-#  curso               string  Nombre de la asignatura
-#  tema                string  Tema puntual de la duda
-#  descripcion         string  Explicación detallada
-#  urgencia            enum    "baja" | "media" | "alta"
-
-URGENCIAS_VALIDAS = {"baja", "media", "alta"}
-
-def validar_solicitud(datos: dict):
-    for campo in ["nombre_estudiante", "email_estudiante",
-                  "curso", "tema", "descripcion", "urgencia"]:
+def validar_campos(datos: dict):
+    obligatorios = [
+        "nombre_estudiante", "correo_estudiante", "curso",
+        "tema", "descripcion", "urgencia", "marca_tiempo"
+    ]
+    for campo in obligatorios:
         if campo not in datos:
-            return False, f"Falta el campo obligatorio: '{campo}'"
+            return False, f"Campo requerido ausente: '{campo}'"
 
     if not isinstance(datos["nombre_estudiante"], str) or not datos["nombre_estudiante"].strip():
-        return False, "'nombre_estudiante' debe ser texto no vacío"
-    if not isinstance(datos["email_estudiante"], str) or "@" not in datos["email_estudiante"]:
-        return False, "'email_estudiante' debe ser un correo válido"
+        return False, "'nombre_estudiante' no puede estar vacío"
+    if not isinstance(datos["correo_estudiante"], str) or "@" not in datos["correo_estudiante"]:
+        return False, "'correo_estudiante' no tiene formato válido"
     if not isinstance(datos["curso"], str) or not datos["curso"].strip():
-        return False, "'curso' debe ser texto no vacío"
+        return False, "'curso' no puede estar vacío"
     if not isinstance(datos["tema"], str) or not datos["tema"].strip():
-        return False, "'tema' debe ser texto no vacío"
+        return False, "'tema' no puede estar vacío"
     if not isinstance(datos["descripcion"], str) or not datos["descripcion"].strip():
-        return False, "'descripcion' debe ser texto no vacío"
+        return False, "'descripcion' no puede estar vacía"
     if datos["urgencia"] not in URGENCIAS_VALIDAS:
         return False, f"'urgencia' debe ser: {', '.join(sorted(URGENCIAS_VALIDAS))}"
+    if not isinstance(datos["marca_tiempo"], str):
+        return False, "'marca_tiempo' debe tener formato ISO 8601"
 
     return True, None
 
 
-def autenticar(req) -> bool:
-    return req.headers.get("X-API-key", "") == CLAVE_API
+def clasificar(tema: str, urgencia: str) -> dict:
+    tema_lower = tema.lower().strip()
+    tema_critico = any(p in tema_lower for p in TEMAS_CRITICOS)
+    urgencia_maxima = urgencia == "alto"
 
-# ─────────────────────────────────────────────────────────────
-#  ENDPOINTS
-# ─────────────────────────────────────────────────────────────
+    if urgencia_maxima and tema_critico:
+        return {
+            "tipo": "compleja",
+            "accion": "requiere_asesoria",
+            "descripcion": "La solicitud requiere asesoría formal con el docente."
+        }
+    return {
+        "tipo": "simple",
+        "accion": "respuesta_directa",
+        "descripcion": "La solicitud puede resolverse con una respuesta directa."
+    }
+
+
+def construir_eventos(clasificacion: dict, id_solicitud: str, datos: dict) -> list:
+    ts = momento_actual()
+    eventos = [
+        {
+            "evento": "solicitud_creada",
+            "id_solicitud": id_solicitud,
+            "timestamp": ts,
+            "datos": {
+                "estudiante": datos["nombre_estudiante"],
+                "curso": datos["curso"],
+                "tema": datos["tema"],
+                "urgencia": datos["urgencia"]
+            }
+        },
+        {
+            "evento": "solicitud_clasificada",
+            "id_solicitud": id_solicitud,
+            "timestamp": ts,
+            "clasificacion": clasificacion["tipo"],
+            "accion_a_tomar": clasificacion["accion"]
+        }
+    ]
+
+    if clasificacion["tipo"] == "simple":
+        eventos.append({
+            "evento": "respuesta_directa_enviada",
+            "id_solicitud": id_solicitud,
+            "timestamp": ts,
+            "mensaje": "El docente puede responder sin agendar asesoría."
+        })
+    else:
+        eventos.append({
+            "evento": "requiere_asesoria",
+            "id_solicitud": id_solicitud,
+            "timestamp": ts,
+            "motivo": f"Urgencia alta + tema crítico detectado: {datos['tema']}"
+        })
+        eventos.append({
+            "evento": "asesoria_programada",
+            "id_solicitud": id_solicitud,
+            "timestamp": ts,
+            "docente_notificado": True,
+            "correo_estudiante": datos["correo_estudiante"]
+        })
+
+    return eventos
+
 
 @aplicacion.get("/")
 def inicio():
     return jsonify({
         "servicio": "Sistema de Asesorías Académicas – CECAR",
-        "version":  "2.0.0",
-        "auth":     "Header: X-API-key: CECAR-DEMO-KEY",
+        "version": "1.0.0",
+        "autenticacion": "Header requerido → X-API-key: CECAR-DEMO-KEY",
         "endpoints": {
-            "POST /api/v1/solicitud":   "Registrar solicitud académica",
-            "GET  /api/v1/solicitudes": "Listar solicitudes",
-            "GET  /api/v1/eventos":     "Log de eventos",
-            "GET  /api/v1/asesorias":   "Asesorías programadas",
-            "GET  /api/v1/metricas":    "Métricas del sistema"
+            "POST /api/v1/solicitud": "Registra y clasifica una solicitud académica",
+            "GET  /api/v1/solicitudes": "Consulta todas las solicitudes almacenadas"
         }
     })
 
 
 @aplicacion.post("/api/v1/solicitud")
 def recibir_solicitud():
-    if not autenticar(request):
-        return respuesta_error(401, "NO_AUTORIZADO",
-                               "Header X-API-key ausente o incorrecto.")
+    clave = request.headers.get("X-API-key", "")
+    if clave != CLAVE_API:
+        return error_json(401, "NO_AUTORIZADO", "Clave de API ausente o incorrecta.")
 
     datos = request.get_json(silent=True) or {}
-    es_valido, razon = validar_solicitud(datos)
-    if not es_valido:
-        return respuesta_error(400, "FORMATO_INVALIDO",
-                               "El JSON no cumple el contrato.",
-                               {"razon": razon})
+    valido, razon = validar_campos(datos)
+    if not valido:
+        return error_json(400, "DATOS_INVALIDOS", "El cuerpo no cumple el contrato esperado.", {"razon": razon})
 
-    # ── Crear solicitud ──────────────────────────────────────
     id_solicitud = f"SOL-{str(uuid.uuid4())[:8].upper()}"
+    ts = momento_actual()
+    fecha = fecha_legible()
+
     solicitud = {
-        "id_solicitud":      id_solicitud,
-        "nombre_estudiante": datos["nombre_estudiante"].strip(),
-        "email_estudiante":  datos["email_estudiante"].strip().lower(),
-        "curso":             datos["curso"].strip(),
-        "tema":              datos["tema"].strip(),
-        "descripcion":       datos["descripcion"].strip(),
-        "urgencia":          datos["urgencia"],
-        "recibido_en":       ahora_iso(),
-        "estado":            "pendiente"
+        "id_solicitud": id_solicitud,
+        "recibido_en": ts,
+        **datos
     }
     SOLICITUDES.append(solicitud)
 
-    # ── EVENTO 1: solicitud_creada ───────────────────────────
-    registrar_evento("solicitud_creada", id_solicitud, {
-        "nombre_estudiante": solicitud["nombre_estudiante"],
-        "email_estudiante":  solicitud["email_estudiante"],
-        "curso":             solicitud["curso"],
-        "tema":              solicitud["tema"],
-        "urgencia":          solicitud["urgencia"]
-    })
+    clasificacion = clasificar(datos["tema"], datos["urgencia"])
+    eventos = construir_eventos(clasificacion, id_solicitud, datos)
 
-    # ── Clasificar ───────────────────────────────────────────
-    tipo = clasificar_solicitud(solicitud["descripcion"], solicitud["urgencia"])
-    solicitud["tipo_consulta"] = tipo
-
-    # ── EVENTO 2: solicitud_clasificada ─────────────────────
-    registrar_evento("solicitud_clasificada", id_solicitud, {
-        "tipo_consulta":     tipo,
-        "nombre_estudiante": solicitud["nombre_estudiante"],
-        "email_estudiante":  solicitud["email_estudiante"],
-        "curso":             solicitud["curso"],
-        "tema":              solicitud["tema"],
-        "urgencia":          solicitud["urgencia"]
-    })
-
-    # ── WEBHOOK CORREOS: payload limpio y garantizado ────────
-    # Se envía SOLO cuando la clasificación está completa.
-    # Todos los campos están siempre presentes → Make no falla.
-    payload_correo = {
-        "tipo_consulta":     tipo,              # "simple" o "compleja"
-        "nombre_estudiante": solicitud["nombre_estudiante"],
-        "email_estudiante":  solicitud["email_estudiante"],
-        "curso":             solicitud["curso"],
-        "tema":              solicitud["tema"],
-        "urgencia":          solicitud["urgencia"],
-        "id_solicitud":      id_solicitud,
-        "timestamp":         ahora_iso()
+    payload_make = {
+        "id_solicitud": id_solicitud,
+        "fecha_registro": fecha,
+        "timestamp": ts,
+        "nombre_estudiante": datos["nombre_estudiante"],
+        "correo_estudiante": datos["correo_estudiante"],
+        "curso": datos["curso"],
+        "tema": datos["tema"],
+        "descripcion": datos["descripcion"],
+        "urgencia": datos["urgencia"],
+        "clasificacion": clasificacion["tipo"],
+        "accion": clasificacion["accion"],
+        "descripcion_clasificacion": clasificacion["descripcion"],
+        "total_eventos": len(eventos),
+        "nombres_eventos": [e["evento"] for e in eventos],
+        "estado_asesoria": "pendiente" if clasificacion["tipo"] == "compleja" else "no_aplica",
+        "docente_notificado": clasificacion["tipo"] == "compleja",
+        "total_solicitudes_sistema": len(SOLICITUDES)
     }
-    enviar_webhook(MAKE_WEBHOOK_CORREOS, payload_correo)
+    disparar_webhook(payload_make)
 
-    # ── RAMA SIMPLE ──────────────────────────────────────────
-    if tipo == "simple":
-        solicitud["estado"] = "respondida"
-
-        respuesta_texto = (
-            f"Hola {solicitud['nombre_estudiante']}, tu consulta sobre "
-            f"'{solicitud['tema']}' en '{solicitud['curso']}' fue recibida. "
-            f"Un docente te responderá directamente en breve. "
-            f"[Urgencia: {solicitud['urgencia']}]"
-        )
-
-        # ── EVENTO 3: respuesta_directa_enviada ─────────────
-        registrar_evento("respuesta_directa_enviada", id_solicitud, {
-            "nombre_estudiante": solicitud["nombre_estudiante"],
-            "email_estudiante":  solicitud["email_estudiante"],
-            "tema":              solicitud["tema"],
-            "curso":             solicitud["curso"],
-            "respuesta":         respuesta_texto
-        })
-
-        return jsonify({
-            "ok":                  True,
-            "id_solicitud":        id_solicitud,
-            "solicitud":           solicitud,
-            "clasificacion":       "simple",
-            "accion":              "respuesta_directa",
-            "respuesta_docente":   respuesta_texto,
-            "asesoria_programada": False
-        }), 201
-
-    # ── RAMA COMPLEJA ────────────────────────────────────────
-    else:
-        solicitud["estado"] = "asesoria_programada"
-
-        id_asesoria = f"ASE-{str(uuid.uuid4())[:8].upper()}"
-        asesoria = {
-            "id_asesoria":       id_asesoria,
-            "id_solicitud":      id_solicitud,
-            "nombre_estudiante": solicitud["nombre_estudiante"],
-            "email_estudiante":  solicitud["email_estudiante"],
-            "curso":             solicitud["curso"],
-            "tema":              solicitud["tema"],
-            "urgencia":          solicitud["urgencia"],
-            "estado":            "programada",
-            "creada_en":         ahora_iso()
-        }
-        ASESORIAS.append(asesoria)
-
-        # ── EVENTO 4: requiere_asesoria ──────────────────────
-        registrar_evento("requiere_asesoria", id_solicitud, {
-            "nombre_estudiante": solicitud["nombre_estudiante"],
-            "email_estudiante":  solicitud["email_estudiante"],
-            "curso":             solicitud["curso"],
-            "tema":              solicitud["tema"],
-            "urgencia":          solicitud["urgencia"],
-            "id_asesoria":       id_asesoria
-        })
-
-        # ── EVENTO 5: asesoria_programada ────────────────────
-        registrar_evento("asesoria_programada", id_solicitud, {
-            "id_asesoria":       id_asesoria,
-            "nombre_estudiante": solicitud["nombre_estudiante"],
-            "email_estudiante":  solicitud["email_estudiante"],
-            "curso":             solicitud["curso"],
-            "tema":              solicitud["tema"],
-            "urgencia":          solicitud["urgencia"]
-        })
-
-        return jsonify({
-            "ok":                  True,
-            "id_solicitud":        id_solicitud,
-            "solicitud":           solicitud,
-            "clasificacion":       "compleja",
-            "accion":              "asesoria_programada",
-            "id_asesoria":         id_asesoria,
-            "mensaje": (
-                f"Tu solicitud requiere asesoría formal. "
-                f"Se creó la asesoría {id_asesoria}. "
-                f"El docente será notificado para confirmar el horario."
-            ),
-            "asesoria_programada": True
-        }), 201
+    return jsonify({
+        "ok": True,
+        "id_solicitud": id_solicitud,
+        "solicitud_almacenada": solicitud,
+        "clasificacion": clasificacion,
+        "eventos_generados": eventos,
+        "total_solicitudes": len(SOLICITUDES)
+    }), 201
 
 
 @aplicacion.get("/api/v1/solicitudes")
 def listar_solicitudes():
-    if not autenticar(request):
-        return respuesta_error(401, "NO_AUTORIZADO",
-                               "Header X-API-key ausente o incorrecto.")
-    return jsonify({"ok": True, "total": len(SOLICITUDES),
-                    "solicitudes": SOLICITUDES})
-
-
-@aplicacion.get("/api/v1/eventos")
-def listar_eventos():
-    if not autenticar(request):
-        return respuesta_error(401, "NO_AUTORIZADO",
-                               "Header X-API-key ausente o incorrecto.")
-    return jsonify({"ok": True, "total_eventos": len(EVENTOS),
-                    "eventos": EVENTOS})
-
-
-@aplicacion.get("/api/v1/asesorias")
-def listar_asesorias():
-    if not autenticar(request):
-        return respuesta_error(401, "NO_AUTORIZADO",
-                               "Header X-API-key ausente o incorrecto.")
-    return jsonify({"ok": True, "total": len(ASESORIAS),
-                    "asesorias": ASESORIAS})
-
-
-@aplicacion.get("/api/v1/metricas")
-def metricas():
-    if not autenticar(request):
-        return respuesta_error(401, "NO_AUTORIZADO",
-                               "Header X-API-key ausente o incorrecto.")
-
-    simples   = [s for s in SOLICITUDES if s.get("tipo_consulta") == "simple"]
-    complejas = [s for s in SOLICITUDES if s.get("tipo_consulta") == "compleja"]
-
-    por_curso = {}
-    for s in SOLICITUDES:
-        c = s.get("curso", "desconocido")
-        por_curso[c] = por_curso.get(c, 0) + 1
-
-    por_urgencia = {"baja": 0, "media": 0, "alta": 0}
-    for s in SOLICITUDES:
-        u = s.get("urgencia", "baja")
-        por_urgencia[u] = por_urgencia.get(u, 0) + 1
-
-    por_evento = {}
-    for e in EVENTOS:
-        t = e.get("tipo", "desconocido")
-        por_evento[t] = por_evento.get(t, 0) + 1
+    clave = request.headers.get("X-API-key", "")
+    if clave != CLAVE_API:
+        return error_json(401, "NO_AUTORIZADO", "Clave de API ausente o incorrecta.")
 
     return jsonify({
         "ok": True,
-        "metricas": {
-            "total_solicitudes":        len(SOLICITUDES),
-            "consultas_simples":        len(simples),
-            "consultas_complejas":      len(complejas),
-            "asesorias_programadas":    len(ASESORIAS),
-            "total_eventos_generados":  len(EVENTOS),
-            "solicitudes_por_curso":    por_curso,
-            "solicitudes_por_urgencia": por_urgencia,
-            "eventos_por_tipo":         por_evento
-        }
+        "total": len(SOLICITUDES),
+        "solicitudes": SOLICITUDES
     })
 
-
-# ─────────────────────────────────────────────────────────────
-#  ARRANQUE
-# ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     puerto = int(os.environ.get("PORT", 3000))
